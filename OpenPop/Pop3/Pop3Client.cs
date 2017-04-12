@@ -7,6 +7,8 @@ using System.Net.Sockets;
 using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Security;
+using System.Runtime.InteropServices;
 using OpenPop.Mime;
 using OpenPop.Mime.Header;
 using OpenPop.Pop3.Exceptions;
@@ -266,6 +268,46 @@ namespace OpenPop.Pop3
 		}
 		#endregion
 
+          /// <summary>
+          /// Converts the contents to a SecureString to a byte array.
+          /// </summary>
+          /// <param name="str">The instance of SecureString to convert</param>
+          /// <returns></returns>
+          /// <exception cref="System.ArgumentNullException">str was null</exception>
+          /// <exception cref="System.OutOfMemoryException">There is insufficient memory available.</exception>
+          private static byte[] SecureStringToArray(SecureString str)
+          {
+              IntPtr bstr = IntPtr.Zero;
+
+              try
+              {
+                  bstr = Marshal.SecureStringToGlobalAllocAnsi(str);
+                  byte[] convertedArray = new byte[str.Length];
+                  unsafe
+                  {
+                      byte* bytesPtr = (byte*)bstr.ToPointer();
+                      for (int i = 0; i < convertedArray.Length; i++)
+                      {
+                          convertedArray[i] = *bytesPtr;
+                          bytesPtr++;
+                      }
+                  }
+
+                  return convertedArray;
+              }
+              catch
+              {
+                  throw;
+              }
+              finally
+              {
+                  if (bstr != IntPtr.Zero)
+                  {
+                      Marshal.ZeroFreeGlobalAllocAnsi(bstr);
+                  }
+              }
+          }
+
 		#region Authentication methods
 		/// <summary>
 		/// Authenticates a user towards the POP server using <see cref="AuthenticationMethod.Auto"/>.<br/>
@@ -284,6 +326,25 @@ namespace OpenPop.Pop3
 			AssertDisposed();
 			Authenticate(username, password, AuthenticationMethod.Auto);
 		}
+
+          /// <summary>
+          /// Authenticates a user towards the POP server using <see cref="AuthenticationMethod.Auto"/>.<br/>
+          /// If this authentication fails but you are sure that the username and password is correct, it might
+          /// be that that the POP3 server is wrongly telling the client it supports <see cref="AuthenticationMethod.Apop"/>.
+          /// You should try using <see cref="Authenticate(string, SecureString, AuthenticationMethod)"/> while passing <see cref="AuthenticationMethod.UsernameAndPassword"/> to the method.
+          /// </summary>
+          /// <param name="username">The username</param>
+          /// <param name="password">The user password</param>
+          /// <exception cref="InvalidLoginException">If the user credentials was not accepted</exception>
+          /// <exception cref="PopServerLockedException">If the server said the the mailbox was locked</exception>
+          /// <exception cref="ArgumentNullException">If <paramref name="username"/> or <paramref name="password"/> is <see langword="null"/></exception>
+          /// <exception cref="LoginDelayException">If the server rejects the login because of too recent logins</exception>
+          /// <exception cref="System.NotImplementedException">Authentication was attempted using MD5Cram or Apop. This hasn't been implemented to work with SecureString.</exception>
+          public void Authenticate(string username, SecureString password)
+          {
+              AssertDisposed();
+              Authenticate(username, password, AuthenticationMethod.Auto);
+          }
 
 		/// <summary>
 		/// Authenticates a user towards the POP server using some <see cref="AuthenticationMethod"/>.
@@ -348,6 +409,73 @@ namespace OpenPop.Pop3
 			State = ConnectionState.Transaction;
 		}
 
+          /// <summary>
+          /// Authenticates a user towards the POP server using some <see cref="AuthenticationMethod"/>.
+          /// </summary>
+          /// <param name="username">The username</param>
+          /// <param name="password">The user password</param>
+          /// <param name="authenticationMethod">The way that the client should authenticate towards the server</param>
+          /// <exception cref="NotSupportedException">If <see cref="AuthenticationMethod.Apop"/> is used, but not supported by the server</exception>
+          /// <exception cref="InvalidLoginException">If the user credentials was not accepted</exception>
+          /// <exception cref="PopServerLockedException">If the server said the the mailbox was locked</exception>
+          /// <exception cref="ArgumentNullException">If <paramref name="username"/> or <paramref name="password"/> is <see langword="null"/></exception>
+          /// <exception cref="LoginDelayException">If the server rejects the login because of too recent logins</exception>
+          /// <exception cref="System.NotImplementedException">Authentication was attempted with CramMD5 or Apop, which hasn't been implemented to work with SecureString.</exception>
+          public void Authenticate(string username, SecureString password, AuthenticationMethod authenticationMethod)
+          {
+              AssertDisposed();
+
+              if (username == null)
+                  throw new ArgumentNullException("username");
+
+              if (password == null)
+                  throw new ArgumentNullException("password");
+
+              if (State != ConnectionState.Authorization)
+                  throw new InvalidUseException("You have to be connected and not authorized when trying to authorize yourself");
+
+              try
+              {
+                  switch (authenticationMethod)
+                  {
+                      case AuthenticationMethod.UsernameAndPassword:
+                          AuthenticateUsingUserAndPassword(username, password);
+                          break;
+
+                      case AuthenticationMethod.Apop:
+                          throw new System.NotImplementedException("Apop functionality hasn't been implemented for use with SecureString");
+                          //AuthenticateUsingApop(username, password);
+                          break;
+
+                      case AuthenticationMethod.Auto:
+                          //if (ApopSupported)
+                          //    AuthenticateUsingApop(username, password);
+                          //else
+                              AuthenticateUsingUserAndPassword(username, password);
+                          break;
+
+                      case AuthenticationMethod.CramMd5:
+                          //AuthenticateUsingCramMd5(username, password);
+                          throw new System.NotImplementedException("CramMD5 functionality hasn't been implemented for use with SecureString");
+                          break;
+                  }
+              }
+              catch (PopServerException e)
+              {
+                  DefaultLogger.Log.LogError("Problem logging in using method " + authenticationMethod + ". Server response was: " + LastServerResponse);
+
+                  // Throw a more specific exception if special cases of failure is detected
+                  // using the response the server generated when the last command was sent
+                  CheckFailedLoginServerResponse(LastServerResponse, e);
+
+                  // If no special failure is detected, tell that the login credentials were wrong
+                  throw new InvalidLoginException(e);
+              }
+
+              // We are now authenticated and therefore we enter the transaction state
+              State = ConnectionState.Transaction;
+          }
+
 		/// <summary>
 		/// Authenticates a user towards the POP server using the USER and PASSWORD commands
 		/// </summary>
@@ -361,6 +489,32 @@ namespace OpenPop.Pop3
 
 			// Authentication was successful if no exceptions thrown before getting here
 		}
+
+          /// <summary>
+          /// Authenticates a user towards the POP server using the USER and PASSWORD commands
+          /// </summary>
+          /// <param name="username">The username</param>
+          /// <param name="password">The user password</param>
+          /// <exception cref="PopServerException">If the server responded with -ERR</exception>
+          private void AuthenticateUsingUserAndPassword(string username, SecureString password)
+          {
+              SendCommand("USER " + username);
+
+              List<byte> passwordCommand = new List<byte>(Encoding.Default.GetBytes("PASS "));
+              passwordCommand.AddRange(SecureStringToArray(password));
+              passwordCommand.Add(Convert.ToByte('\r'));
+              passwordCommand.Add(Convert.ToByte('\n'));
+
+              SendCommand(passwordCommand.ToArray());
+
+              // zero the password. I'm being overzealous but better safe than sorry.
+              for (int i = 0; i < passwordCommand.Count; i++)
+              {
+                  passwordCommand[i] = 0;
+              }
+
+              passwordCommand.Clear();
+          }
 
 		/// <summary>
 		/// Authenticates a user towards the POP server using APOP
@@ -901,7 +1055,7 @@ namespace OpenPop.Pop3
 		/// </summary>
 		/// <param name="command">The command to send to server</param>
 		/// <exception cref="PopServerException">If the server did not send an OK message to the command</exception>
-		private void SendCommand(string command)
+          private void SendCommand(string command)
 		{
 			// Convert the command with CRLF afterwards as per RFC to a byte array which we can write
 			byte[] commandBytes = Encoding.ASCII.GetBytes(command + "\r\n");
@@ -919,6 +1073,35 @@ namespace OpenPop.Pop3
 
 			IsOkResponse(LastServerResponse);
 		}
+
+
+          /// <summary>
+          /// Sends a command to the POP server.<br/>
+          /// If this fails, an exception is thrown.
+          /// </summary>
+          /// <param name="command">The command to send to server</param>
+          /// <exception cref="PopServerException">If the server did not send an OK message to the command</exception>
+          private void SendCommand(byte[] command)
+          {
+
+              // byte array will contain the password, hence
+              // only do this for debugging purposes. 
+#if DEBUG
+              DefaultLogger.Log.LogDebug(string.Format("SendCommand: \"{0}\"",  
+                  System.Text.Encoding.ASCII.GetString(command)));
+#endif
+
+              // Write the command to the server
+              Stream.Write(command, 0, command.Length);
+              Stream.Flush(); // Flush the content as we now wait for a response
+
+              // Read the response from the server. The response should be in ASCII
+              LastServerResponse = StreamUtility.ReadLineAsAscii(Stream);
+
+              DefaultLogger.Log.LogDebug(string.Format("Server-Response: \"{0}\"", LastServerResponse));
+
+              IsOkResponse(LastServerResponse);
+          }
 
 		/// <summary>
 		/// Sends a command to the POP server, expects an integer reply in the response
