@@ -1,4 +1,5 @@
 Fork of the repository https://github.com/foens/hpop
+This fork adds support for SecureString during authentication, since I needed  it for [Erasmus](https://github.com/sethballantyne/Erasmus). The original readme is below.
 
 OpenPop.NET code repository
 ====
