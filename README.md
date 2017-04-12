@@ -1,3 +1,5 @@
+Fork of the repository https://github.com/foens/hpop
+
 OpenPop.NET code repository
 ====
 
